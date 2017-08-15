@@ -77,7 +77,20 @@ def dumps(obj, decimals=16):
         raise geomet.InvalidGeoJSONException('Invalid GeoJSON: %s' % obj)
 
     fmt = '%%.%df' % decimals
-    return exporter(obj, fmt)
+    result = exporter(obj, fmt)
+    srid = obj.get('meta', {}).get('srid')
+    if srid is not None:
+        # Prepend the SRID
+        result = 'SRID=%s;%s' % (srid, result)
+    return result
+
+
+def _assert_next_token(sequence, expected):
+    next_token = next(sequence)
+    if not next_token == expected:
+        raise ValueError(
+            'Expected "%s" but found "%s"' % (expected, next_token)
+        )
 
 
 def loads(string):
@@ -88,7 +101,23 @@ def loads(string):
     # NOTE: This is not the intended purpose of `tokenize`, but it works.
     tokens = (x[1] for x in tokenize.generate_tokens(sio.readline))
     tokens = _tokenize_wkt(tokens)
-    geom_type = next(tokens)
+    geom_type_or_srid = next(tokens)
+    srid = None
+    geom_type = geom_type_or_srid
+    if geom_type_or_srid == 'SRID':
+        # The geometry WKT contains an SRID header.
+        _assert_next_token(tokens, '=')
+        srid = next(tokens)
+        try:
+            # Make sure the SRID is an integer. If not, it's invalid.
+            int(srid)
+        except ValueError:
+            raise ValueError('SRID must be an integer. Got: "%s"' % srid)
+        _assert_next_token(tokens, ';')
+        # We expected the geometry type to be next:
+        geom_type = next(tokens)
+    else:
+        geom_type = geom_type_or_srid
 
     importer = _loads_registry.get(geom_type)
 
@@ -105,7 +134,10 @@ def loads(string):
 
     # Put the peeked element back on the head of the token generator
     tokens = itertools.chain([peek], tokens)
-    return importer(tokens, string)
+    result = importer(tokens, string)
+    if srid is not None:
+        result['meta'] = dict(srid=srid)
+    return result
 
 
 def _tokenize_wkt(tokens):
